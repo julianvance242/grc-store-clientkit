@@ -22,14 +22,19 @@ tools must do it identically** and a subtle divergence would be invisible from e
 - `auth` — device-grant OIDC (RFC 8628), credential store, token resolution + refresh, GHA
   workload-OIDC fetch. Parameterized by `App{Name, TokenEnv}`.
 - `hub` — hub HTTP client: discovery (cached per URL), `CIBearer` (trusted-publishing bearer in
-  GitHub Actions), registry-token mint with `GrantsPush`, `VersionExists` preflight, `SyncBundle`
-  and `SyncPlugin`.
+  GitHub Actions), registry-token mint with `GrantsPush`, `VersionExists` preflight, `GetCatalog`
+  (signer identity, releases), `SyncBundle` and `SyncPlugin`.
 - `bundle` — pack one Gemara artifact into an OCI bundle, push (remote or `PushLocal` dry-run),
-  `AttachReferrer`, and `Publish`: the one publish sequence both tools share (discover → mint →
-  push → sign → provenance → sync).
+  `AttachReferrer`, `Registry.Pull` (bundle + signature by one resolved digest), and `Publish`:
+  the one publish sequence both tools share (discover → mint → push → sign → provenance → sync).
 - `keyless` — Sigstore identity resolution (`SIGSTORE_ID_TOKEN` > GitHub Actions > browser) and the
-  DSSE in-toto signer producing a Sigstore v0.3 bundle. Audience is always a parameter.
+  DSSE in-toto signer producing a Sigstore v0.3 bundle. Audience is always a parameter. Also the
+  verifier (moved from grcli `internal/sigverify`, mirror of the hub's) and
+  `PolicyFromRecordedIdentity`.
 - `provenance` — SLSA v1 predicate builder, with the `Evaluator` binding for EvaluationLogs.
+- `refs` — pure reference selection + host recognition (moved from grcli `internal/refs`).
+- `resolve` — import resolver: pull each import, verify against its own hub-recorded signer
+  (ADR-0045/0048 trust source), fail closed naming the import. Direct-only, no cache.
 - `trustroot` — the pinned public-good Sigstore trusted root, as bytes.
 
 ## Gotchas

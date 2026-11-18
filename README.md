@@ -36,10 +36,17 @@ does it, or if it is user-facing presentation — the CLIs own their own output.
 - **`bundle`** — pack one artifact into a Gemara OCI bundle, push it (or write an OCI layout for a
   dry run), attach OCI 1.1 referrers, and `Publish`: the full sequence in the one order both tools
   must share, fail-closed before any bytes move if the caller cannot push.
-- **`keyless`** — the Sigstore signing identity (explicit token, GitHub Actions, or browser) and a
-  DSSE in-toto signer emitting a Sigstore v0.3 bundle — the shared signed shape.
+- **`keyless`** — the Sigstore signing identity (explicit token, GitHub Actions, or browser), a
+  DSSE in-toto signer emitting a Sigstore v0.3 bundle — the shared signed shape — and the
+  verifier that checks one against the pinned trust root and an expected signer
+  (`PolicyFromRecordedIdentity` pins the identity a hub recorded at ingest).
 - **`provenance`** — the SLSA v1 predicate a publish embeds and signs, including the evaluator
   binding that ties an EvaluationLog to the plugin that produced it.
+- **`refs`** — pure selection of a Gemara artifact's mapping references (`imports`, `extends`,
+  `lexicon`) and recognition of which ones name an artifact on the targeted hub.
+- **`resolve`** — pulls the catalogs an artifact imports, at the pinned version, and verifies each
+  one against the signer the hub recorded for that import. Fails closed naming the import; a
+  reference to another host, or an import the hub does not have, is reported and skipped.
 - **`trustroot`** — the pinned public-good Sigstore trusted root, as bytes. Previously three
   byte-identical copies across grcli, privateer-sdk, and the hub backend; now one rotation obligation.
 
