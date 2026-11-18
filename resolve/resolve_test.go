@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	gbundle "github.com/gemaraproj/go-gemara/bundle"
+	"oras.land/oras-go/v2/errdef"
 
 	"github.com/gemaraproj/grc-store-clientkit/bundle"
 	"github.com/gemaraproj/grc-store-clientkit/hub"
@@ -63,6 +64,8 @@ type world struct {
 	signer  string // signer_identity on acme/core
 	indexed string // manifest_digest the hub lists for v1; "" means "sha256:core"
 	served  string // digest the registry answers with; "" means the requested one
+	status  int    // non-zero: the catalog API answers acme/core with this status
+	pullErr error  // non-nil: the registry pull fails with this
 	tokens  []string
 	pulls   []bundle.Registry
 }
@@ -88,6 +91,10 @@ func setup(t *testing.T, w *world) *hub.Client {
 			w.tokens = append(w.tokens, r.URL.Query().Get("scope"))
 			_, _ = rw.Write([]byte(`{"token":"pull-token"}`))
 		case "/v1/catalogs/acme/core":
+			if w.status != 0 {
+				rw.WriteHeader(w.status)
+				return
+			}
 			_ = json.NewEncoder(rw).Encode(map[string]any{
 				"namespace": "acme", "catalog_id": "core", "signer_identity": w.signer,
 				"releases": []map[string]string{{"version": "v1", "license": "Apache-2.0", "manifest_digest": w.digest()}},
@@ -105,6 +112,9 @@ func setup(t *testing.T, w *world) *hub.Client {
 		w.pulls = append(w.pulls, r)
 		if repository != "acme/core" || tag != w.digest() {
 			t.Errorf("pull %s@%s, want the indexed digest", repository, tag)
+		}
+		if w.pullErr != nil {
+			return nil, w.pullErr
 		}
 		served := w.served
 		if served == "" {
@@ -160,6 +170,8 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 		want    error
 		indexed string
 		served  string
+		status  int
+		pullErr error
 	}{
 		{name: "no recorded signer", version: "v1", want: keyless.ErrNoRecordedSigner},
 		{name: "unsigned", signer: coreSign, version: "v1", verify: keyless.ErrUnsigned, want: keyless.ErrUnsigned},
@@ -168,10 +180,13 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 		{name: "no pinned version", signer: coreSign, version: ""},
 		{name: "no indexed digest", signer: coreSign, version: "v1", indexed: "-"},
 		{name: "registry serves other bytes", signer: coreSign, version: "v1", served: "sha256:other"},
+		{name: "hub 5xx", signer: coreSign, version: "v1", status: http.StatusBadGateway},
+		// The hub lists the release, so a registry 404 is a registry error, never a skip.
+		{name: "registry 404 for a listed release", signer: coreSign, version: "v1", pullErr: errdef.ErrNotFound, want: errdef.ErrNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &world{signer: tc.signer, indexed: tc.indexed, served: tc.served}
+			w := &world{signer: tc.signer, indexed: tc.indexed, served: tc.served, status: tc.status, pullErr: tc.pullErr}
 			res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{err: tc.verify}}).Imports(context.Background(), body(tc.version))
 			var ie *ImportError
 			if res != nil || !errors.As(err, &ie) || !strings.HasPrefix(ie.Import, "acme/core@") {
@@ -203,5 +218,24 @@ func TestImports_CallerCredentialSkipsTheMint(t *testing.T) {
 	}
 	if len(w.tokens) != 0 || w.pulls[0].Token != "" {
 		t.Errorf("tokens = %v, dial token = %q", w.tokens, w.pulls[0].Token)
+	}
+}
+
+func TestImports_CatalogMissingOrYankedIsSkipped(t *testing.T) {
+	for status, reason := range map[int]string{http.StatusNotFound: "not found", http.StatusGone: "yank"} {
+		w := &world{signer: coreSign, status: status}
+		res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1"))
+		if err != nil {
+			t.Fatalf("%d: %v", status, err)
+		}
+		var core *Skipped
+		for i := range res.Skipped {
+			if res.Skipped[i].ReferenceID != "EXT" {
+				core = &res.Skipped[i]
+			}
+		}
+		if len(res.Imports) != 0 || len(w.pulls) != 0 || core == nil || !strings.Contains(core.Reason, reason) {
+			t.Errorf("%d: res = %+v, pulls = %d; want acme/core skipped with %q", status, res, len(w.pulls), reason)
+		}
 	}
 }
