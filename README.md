@@ -15,7 +15,7 @@ This is the counterpart to [`grc-store-protocol`][protocol], and the split betwe
 | | `grc-store-protocol` | `grc-store-clientkit` (this repo) |
 |---|---|---|
 | Holds | the **wire contract** — types, constants, pure functions | the **client behaviour** that acts on it |
-| Dependencies | zero, enforced in CI | allowed — oras-go, sigstore-go, go-gemara, the protocol module |
+| Dependencies | zero, enforced in CI | allowed — oras-go, sigstore-go, go-gemara, sigs.k8s.io/yaml, the protocol module |
 | Network / disk | never | yes — that is what it is for |
 
 A thing belongs here when **more than one client tool must do it identically**, and getting it
@@ -40,9 +40,11 @@ does it, or if it is user-facing presentation — the CLIs own their own output.
   DSSE in-toto signer emitting a Sigstore v0.3 bundle — the shared signed shape — and the
   verifier that checks one against the pinned trust root and an expected signer
   (`PolicyFromRecordedIdentity` pins the identity a hub recorded at ingest).
+  `NewVerifierFromFile` takes a different trusted root, for air-gapped or private Sigstore
+  deployments only; it is not a way to re-vendor the public-good root.
 - **`provenance`** — the SLSA v1 predicate a publish embeds and signs, including the evaluator
   binding that ties an EvaluationLog to the plugin that produced it.
-- **`refs`** — pure selection of a Gemara artifact's mapping references (`imports`, `extends`,
+- **`refs`** — selection of a Gemara artifact's mapping references (`imports`, `extends`,
   `lexicon`) and recognition of which ones name an artifact on the targeted hub.
 - **`resolve`** — pulls the catalogs an artifact imports, at the pinned version, and verifies each
   one against the signer the hub recorded for that import. Fails closed naming the import; a
@@ -56,6 +58,7 @@ does it, or if it is user-facing presentation — the CLIs own their own output.
 go test -race ./...   # add -count=1 to skip the cache
 go vet ./...
 gofmt -l .            # must print nothing
+GRC_STORE_LIVE_HUB=https://hub.grc.store go test ./resolve -run Live   # opt-in, network; test-only, not a runtime override
 golangci-lint run ./...
 ```
 
@@ -64,7 +67,8 @@ and builds both consumer repos against the PR commit — it never blocks a merge
 breaking change can be the right call and a consumer's main can be red on its own.
 
 No Makefile. `go mod tidy` should stay a no-op. The protocol module is the zero-dependency one; this
-module carries oras-go, sigstore-go, go-gemara, and the protocol module, and adding anything further
+module carries oras-go, sigstore-go, go-gemara, sigs.k8s.io/yaml (`refs` parses artifact bodies
+with it), and the protocol module, and adding anything further
 is a decision worth making deliberately rather than by accident.
 
 ## Gotchas

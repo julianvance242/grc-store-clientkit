@@ -12,7 +12,8 @@ tools must do it identically** and a subtle divergence would be invisible from e
 ## Dev loop
 - `go test -race ./...` · `go vet ./...` · `gofmt -l .` (must print nothing) · `golangci-lint run ./...`
 - No Makefile. `go mod tidy` should stay a no-op. The **protocol** module is the zero-dep one; this
-  module carries oras-go, sigstore-go, go-gemara, and the protocol module (since v0.2.0).
+  module carries oras-go, sigstore-go, go-gemara, the protocol module (since v0.2.0), and
+  sigs.k8s.io/yaml (for `refs`).
 - CI: `ci.yml` gates the above. `compat.yml` is **advisory only** — a `gorelease` API diff against
   the last tag, and a build of grcli + privateer-sdk against the PR commit. Neither blocks a merge:
   on v0.x a breaking change is a legitimate call, and a consumer's main can be red for its own
@@ -32,7 +33,8 @@ tools must do it identically** and a subtle divergence would be invisible from e
   verifier (moved from grcli `internal/sigverify`, mirror of the hub's) and
   `PolicyFromRecordedIdentity`.
 - `provenance` — SLSA v1 predicate builder, with the `Evaluator` binding for EvaluationLogs.
-- `refs` — pure reference selection + host recognition (moved from grcli `internal/refs`).
+- `refs` — reference selection + host recognition (moved from grcli `internal/refs`). Here, not
+  in protocol, because it parses with go-gemara and sigs.k8s.io/yaml.
 - `resolve` — import resolver: pull each import, verify against its own hub-recorded signer
   (semaphore ADR-0122), fail closed naming the import. Direct-only, no cache.
 - `trustroot` — the pinned public-good Sigstore trusted root, as bytes.
@@ -45,6 +47,8 @@ tools must do it identically** and a subtle divergence would be invisible from e
   the go-gemara v0.9 bump did to grcli's `bundle.Files` call sites.
 - **`trustroot/trusted_root.json` is trust material.** Rotation is now one edit here — that is the
   entire reason the package exists. Do not let a consumer re-vendor its own copy.
+  `keyless.NewVerifierFromFile` is the sanctioned exception: a different root for air-gapped or
+  private Sigstore deployments, never a copy of the public-good one.
 - **Do not add a signing-identity helper to `auth` that defaults its audience.** The hub bearer and
   the Fulcio signing token come from different issuers for different purposes; `FetchGitHubActionsToken`
   takes the audience as an argument precisely so the two can never be silently conflated.

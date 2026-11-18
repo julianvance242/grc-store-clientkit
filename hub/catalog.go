@@ -24,6 +24,8 @@ type Release struct {
 	ManifestDigest string `json:"manifest_digest"`
 	PushedAt       string `json:"pushed_at"`
 	License        string `json:"license,omitempty"`
+	// TombstonedAt is set when the version was yanked; the hub still lists it.
+	TombstonedAt string `json:"tombstoned_at,omitempty"`
 }
 
 // Catalog is the subset of GET /v1/catalogs/{ns}/{id} clients read.
@@ -51,14 +53,15 @@ func (c *Catalog) ReleaseFor(version string) *Release {
 	return nil
 }
 
-// GetCatalog fetches a catalog and its releases. Public route; no bearer.
+// GetCatalog fetches a catalog and its releases. The bearer is sent when set:
+// the hub answers 404 for a private namespace the caller cannot see.
 // A 404 wraps ErrCatalogNotFound and a 410 wraps ErrCatalogTombstoned.
 func (c *Client) GetCatalog(ctx context.Context, namespace, catalogID string) (*Catalog, error) {
 	if namespace == "" || catalogID == "" {
 		return nil, errors.New("namespace and catalog id are required")
 	}
 	path := fmt.Sprintf("/v1/catalogs/%s/%s", neturl.PathEscape(namespace), neturl.PathEscape(catalogID))
-	status, body, err := c.do(ctx, http.MethodGet, path, nil, false)
+	status, body, err := c.do(ctx, http.MethodGet, path, nil, true)
 	if err != nil {
 		return nil, err
 	}

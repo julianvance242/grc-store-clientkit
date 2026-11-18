@@ -3,8 +3,10 @@
 package bundle
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -43,7 +45,7 @@ func pull(ctx context.Context, target oras.ReadOnlyTarget, tag string) (*Pulled,
 	if err != nil {
 		return nil, fmt.Errorf("resolving %s: %w", tag, err)
 	}
-	b, err := gbundle.Unpack(ctx, pinned{target, desc}, tag)
+	b, err := gbundle.Unpack(ctx, &pinned{ReadOnlyTarget: target, desc: desc, remaining: MaxPullBytes}, tag)
 	if err != nil {
 		return nil, err
 	}
@@ -54,14 +56,42 @@ func pull(ctx context.Context, target oras.ReadOnlyTarget, tag string) (*Pulled,
 	return &Pulled{Bundle: b, ManifestDigest: desc.Digest.String(), Signature: sig}, nil
 }
 
+// MaxPullBytes caps the manifest, config and layers one Pull reads, summed.
+// It equals the hub's MaxBundleBytes, the most a catalog bundle can hold.
+const MaxPullBytes = 16 << 20
+
+// ErrPullTooLarge is returned when a bundle's blobs exceed MaxPullBytes.
+var ErrPullTooLarge = errors.New("bundle exceeds the pull size cap")
+
 // pinned answers every Resolve with the descriptor already resolved, so
-// Unpack reads that manifest and never re-resolves the tag.
+// Unpack reads that manifest and never re-resolves the tag. Every Fetch is
+// read in full and checked against its descriptor's size and digest, because
+// neither oras's remote Fetch nor go-gemara's Unpack verifies the bytes: the
+// signed manifest digest pins the manifest, the manifest pins each layer.
 type pinned struct {
 	oras.ReadOnlyTarget
-	desc ocispec.Descriptor
+	desc      ocispec.Descriptor
+	remaining int64
 }
 
-func (p pinned) Resolve(context.Context, string) (ocispec.Descriptor, error) { return p.desc, nil }
+func (p *pinned) Resolve(context.Context, string) (ocispec.Descriptor, error) { return p.desc, nil }
+
+func (p *pinned) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+	if desc.Size < 0 || desc.Size > p.remaining {
+		return nil, fmt.Errorf("%w (%d bytes)", ErrPullTooLarge, MaxPullBytes)
+	}
+	p.remaining -= desc.Size
+	rc, err := p.ReadOnlyTarget.Fetch(ctx, desc)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	b, err := content.ReadAll(rc, desc)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", desc.Digest, err)
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
 
 // signatureBundle returns the Sigstore bundle bytes from subject's signature
 // referrer, nil when there is none, and an error for a transport failure or

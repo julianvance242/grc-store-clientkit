@@ -70,6 +70,9 @@ type Artifact struct {
 	// Notes records non-fatal parse caveats (e.g. an artifact type whose
 	// imports shape we don't yet walk), surfaced to the user.
 	Notes []string
+	// ImportsUnreadable is set when the body has an imports/extends field
+	// whose shape could not be read, so ImportsOnly may be incomplete.
+	ImportsUnreadable bool
 }
 
 // Scan parses an artifact body (YAML) and extracts its mapping references and
@@ -99,13 +102,28 @@ func Scan(body []byte) (*Artifact, error) {
 
 	// extends/imports are top-level on the catalog artifact types and share a
 	// uniform shape ([]ArtifactMapping / []MultiEntryMapping). Policy carries a
-	// structurally different `imports`, which fails this decode — caught and
-	// noted, not fatal.
+	// map of lists instead (policies/catalogs/guidance, each entry with a
+	// reference-id), read by the second decode. Any other shape is noted and
+	// flagged as ImportsUnreadable.
 	var rel struct {
 		Imports []gemara.MultiEntryMapping `json:"imports"`
 		Extends []gemara.ArtifactMapping   `json:"extends"`
 	}
-	if err := yaml.Unmarshal(body, &rel); err != nil {
+	var policy struct {
+		Imports map[string][]gemara.ArtifactMapping `json:"imports"`
+	}
+	if err := yaml.Unmarshal(body, &rel); err != nil && yaml.Unmarshal(body, &policy) == nil {
+		for _, list := range policy.Imports {
+			for _, imp := range list {
+				if imp.ReferenceId != "" {
+					a.category[imp.ReferenceId] = CategoryImports
+					a.importIDs[imp.ReferenceId] = true
+				}
+			}
+		}
+		return a, nil
+	} else if err != nil {
+		a.ImportsUnreadable = true
 		a.Notes = append(a.Notes, fmt.Sprintf(
 			"could not read imports/extends relationships for artifact type %q (%v) — "+
 				"imports-only resolution finds nothing for it; resolving every mapping reference still works",

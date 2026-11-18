@@ -80,10 +80,9 @@ func TestSelectByMode(t *testing.T) {
 	}
 }
 
-func TestScanPolicyImportsAreNoted(t *testing.T) {
-	// Policy's `imports` is a map, not a list — it cannot decode into the
-	// catalog-shaped relationship struct. Scan must record a note, not fail,
-	// and metadata references must still be readable.
+func TestScanWalksPolicyImports(t *testing.T) {
+	// Policy's `imports` is a map of lists, not a list. Its reference-ids
+	// must still be selected as imports.
 	const policyYAML = `
 metadata:
   id: my-policy
@@ -106,16 +105,21 @@ imports:
 	if err != nil {
 		t.Fatalf("Scan must not fail on Policy: %v", err)
 	}
-	if len(a.Notes) == 0 {
-		t.Error("expected a note about unreadable Policy imports")
+	if a.ImportsUnreadable || len(a.Notes) != 0 {
+		t.Errorf("Policy imports must be read: notes = %v", a.Notes)
 	}
-	// --with-references still works off the metadata registry.
-	if got := a.Select(AllReferences); len(got) != 1 {
-		t.Errorf("AllReferences selected %d, want 1", len(got))
+	if got := a.Select(ImportsOnly); len(got) != 1 || got[0].ID != "cat" {
+		t.Errorf("ImportsOnly selected %+v, want cat", got)
 	}
-	// --with-imports finds nothing (we don't walk Policy imports yet).
-	if got := a.Select(ImportsOnly); len(got) != 0 {
-		t.Errorf("ImportsOnly selected %d, want 0 for Policy", len(got))
+}
+
+func TestScanUnreadableImportsAreFlagged(t *testing.T) {
+	a, err := Scan([]byte("metadata:\n  id: x\nimports: just-a-string\n"))
+	if err != nil {
+		t.Fatalf("Scan must not fail on an unknown imports shape: %v", err)
+	}
+	if !a.ImportsUnreadable || len(a.Notes) == 0 {
+		t.Errorf("unreadable imports must be flagged and noted: %+v", a)
 	}
 }
 
@@ -148,6 +152,16 @@ func TestRecognize(t *testing.T) {
 				t.Error("expected a non-empty skip reason")
 			}
 		})
+	}
+}
+
+func TestRecognizeLocalTargetHub(t *testing.T) {
+	// A non-grc.store target (API URL shape) is matched by exact host, port included.
+	if ns, id, ok, _ := Recognize("https://localhost:8080/v1/catalogs/acme/baseline", "localhost:8080"); !ok || ns != "acme" || id != "baseline" {
+		t.Errorf("same host:port: ok = %v (%q,%q)", ok, ns, id)
+	}
+	if _, _, ok, _ := Recognize("https://localhost:9090/v1/catalogs/acme/baseline", "localhost:8080"); ok {
+		t.Error("different port must not match the target")
 	}
 }
 

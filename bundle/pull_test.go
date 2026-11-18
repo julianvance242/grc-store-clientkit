@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/revanite-io/grc-store-protocol/mediatype"
+	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/errdef"
 )
@@ -73,6 +75,63 @@ func TestPull_UnsignedAndMalformed(t *testing.T) {
 	}
 	if _, err := pull(ctx, store, "missing"); err == nil {
 		t.Fatal("missing tag: want error")
+	}
+}
+
+// hostile serves same-length tampered bytes for the artifact body, and moves the
+// tag to other after the first Resolve.
+type hostile struct {
+	oras.ReadOnlyTarget
+	tamper   bool
+	resolves int
+	other    ocispec.Descriptor
+}
+
+func (h *hostile) Resolve(ctx context.Context, ref string) (ocispec.Descriptor, error) {
+	h.resolves++
+	if h.resolves > 1 {
+		return h.other, nil
+	}
+	return h.ReadOnlyTarget.Resolve(ctx, ref)
+}
+
+func (h *hostile) Fetch(ctx context.Context, d ocispec.Descriptor) (io.ReadCloser, error) {
+	rc, err := h.ReadOnlyTarget.Fetch(ctx, d)
+	if err != nil || !h.tamper {
+		return rc, err
+	}
+	b, err := io.ReadAll(rc)
+	_ = rc.Close()
+	// Same length, valid YAML, different content: only a digest check catches it.
+	return io.NopCloser(bytes.NewReader(bytes.ReplaceAll(b, []byte("my-log"), []byte("my-lox")))), err
+}
+
+func TestPull_VerifiesBytesAndPinsTheResolvedManifest(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	res, err := pack(ctx, store, "v1", testInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := pack(ctx, store, "v2", func() Input {
+		in := testInput
+		in.Body = []byte("metadata:\n  id: my-log\n  version: 2.0.0\n")
+		return in
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bytes that do not hash to their descriptor fail the pull.
+	if _, err := pull(ctx, &hostile{ReadOnlyTarget: store, tamper: true}, "v1"); err == nil {
+		t.Fatal("tampered layer: want error")
+	}
+	// A tag that moves after the first Resolve does not change what is read.
+	got, err := pull(ctx, &hostile{ReadOnlyTarget: store, other: other.Manifest}, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ManifestDigest != res.ManifestDigest || string(got.Bundle.Source.Data) != string(testInput.Body) {
+		t.Errorf("pulled %s %q, want the first-resolved manifest", got.ManifestDigest, got.Bundle.Source.Data)
 	}
 }
 

@@ -10,9 +10,11 @@
 // grc-store-protocol/refurl). A reference to a host that is neither a
 // grc.store host nor the targeted hub, and an import the hub does not have,
 // are reported in Result.Skipped; "does not have" means the hub's catalog
-// API answers 404 or 410, or lists no release at the pinned version. Every
+// API answers 404 or 410, lists no release at the pinned version, or marks
+// that release yanked (tombstoned). Every
 // other failure fails the whole resolution closed with an *ImportError
-// naming the import: no version pinned, no recorded signer or indexed
+// naming the import (or, for an imports field that cannot be read, the
+// artifact): no version pinned, no recorded signer or indexed
 // digest, no signature, a signature that does not verify, or a hub,
 // registry or transport error (a registry 404 for a release the hub lists
 // included). The bytes pulled are those of the digest the hub indexed for
@@ -117,6 +119,10 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// An imports field we cannot read would otherwise resolve as "no imports".
+	if a.ImportsUnreadable {
+		return nil, fmt.Errorf("cannot read the artifact's imports: %v", a.Notes)
+	}
 
 	res := &Result{Notes: a.Notes}
 	var reg *bundle.Registry // discovered on the first pull
@@ -147,6 +153,10 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 		rel := cat.ReleaseFor(s.Version)
 		if rel == nil {
 			res.Skipped = append(res.Skipped, Skipped{s.ID, s.URL, "version " + s.Version + " is not published on the hub"})
+			continue
+		}
+		if rel.TombstonedAt != "" {
+			res.Skipped = append(res.Skipped, Skipped{s.ID, s.URL, "version " + s.Version + " was yanked"})
 			continue
 		}
 		if rel.ManifestDigest == "" {

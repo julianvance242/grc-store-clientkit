@@ -66,6 +66,8 @@ type world struct {
 	served  string // digest the registry answers with; "" means the requested one
 	status  int    // non-zero: the catalog API answers acme/core with this status
 	pullErr error  // non-nil: the registry pull fails with this
+	broken  string // a hub path that answers 502 (discovery or token mint)
+	yanked  bool   // v1 is listed with tombstoned_at
 	tokens  []string
 	pulls   []bundle.Registry
 }
@@ -83,7 +85,15 @@ func (w *world) digest() string {
 
 func setup(t *testing.T, w *world) *hub.Client {
 	t.Helper()
+	// Ambient registry credentials would skip the mint the tests assert on.
+	for _, env := range []string{bundle.RegistryTokenEnv, bundle.RegistryUsernameEnv, bundle.RegistryPasswordEnv} {
+		t.Setenv(env, "")
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == w.broken {
+			rw.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		switch r.URL.Path {
 		case hub.WellKnownPath:
 			_, _ = rw.Write([]byte(`{"registry_url":"https://oci.test"}`))
@@ -95,9 +105,13 @@ func setup(t *testing.T, w *world) *hub.Client {
 				rw.WriteHeader(w.status)
 				return
 			}
+			rel := map[string]string{"version": "v1", "license": "Apache-2.0", "manifest_digest": w.digest()}
+			if w.yanked {
+				rel["tombstoned_at"] = "2026-11-01T00:00:00Z"
+			}
 			_ = json.NewEncoder(rw).Encode(map[string]any{
 				"namespace": "acme", "catalog_id": "core", "signer_identity": w.signer,
-				"releases": []map[string]string{{"version": "v1", "license": "Apache-2.0", "manifest_digest": w.digest()}},
+				"releases": []map[string]string{rel},
 			})
 		case "/v1/catalogs/acme/primary":
 			t.Error("the importing artifact's record must never be read")
@@ -131,7 +145,6 @@ func setup(t *testing.T, w *world) *hub.Client {
 }
 
 func TestImports_PullsAndVerifiesAgainstTheImportsOwnRecord(t *testing.T) {
-	t.Setenv(bundle.RegistryTokenEnv, "")
 	w := &world{signer: coreSign}
 	v := &fakeVerifier{}
 	res, err := (&Resolver{Hub: setup(t, w), Verifier: v}).Imports(context.Background(), body("v1"))
@@ -172,6 +185,7 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 		served  string
 		status  int
 		pullErr error
+		broken  string
 	}{
 		{name: "no recorded signer", version: "v1", want: keyless.ErrNoRecordedSigner},
 		{name: "unsigned", signer: coreSign, version: "v1", verify: keyless.ErrUnsigned, want: keyless.ErrUnsigned},
@@ -182,11 +196,13 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 		{name: "registry serves other bytes", signer: coreSign, version: "v1", served: "sha256:other"},
 		{name: "hub 5xx", signer: coreSign, version: "v1", status: http.StatusBadGateway},
 		// The hub lists the release, so a registry 404 is a registry error, never a skip.
+		{name: "discovery fails", signer: coreSign, version: "v1", broken: hub.WellKnownPath},
+		{name: "pull-token mint fails", signer: coreSign, version: "v1", broken: "/v2/token"},
 		{name: "registry 404 for a listed release", signer: coreSign, version: "v1", pullErr: errdef.ErrNotFound, want: errdef.ErrNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &world{signer: tc.signer, indexed: tc.indexed, served: tc.served, status: tc.status, pullErr: tc.pullErr}
+			w := &world{signer: tc.signer, indexed: tc.indexed, served: tc.served, status: tc.status, pullErr: tc.pullErr, broken: tc.broken}
 			res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{err: tc.verify}}).Imports(context.Background(), body(tc.version))
 			var ie *ImportError
 			if res != nil || !errors.As(err, &ie) || !strings.HasPrefix(ie.Import, "acme/core@") {
@@ -205,19 +221,60 @@ func TestImports_UnpublishedImportIsSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Imports) != 0 || len(res.Skipped) != 2 || len(w.pulls) != 0 {
+	if len(res.Imports) != 0 || len(res.Skipped) != 2 || len(w.pulls) != 0 ||
+		res.Skipped[0].ReferenceID != "CORE" || !strings.Contains(res.Skipped[0].Reason, "not published") {
 		t.Errorf("res = %+v, pulls = %d", res, len(w.pulls))
 	}
 }
 
 func TestImports_CallerCredentialSkipsTheMint(t *testing.T) {
-	t.Setenv(bundle.RegistryTokenEnv, "mine")
-	w := &world{signer: coreSign}
-	if _, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1")); err != nil {
+	for name, env := range map[string]map[string]string{
+		"token":             {bundle.RegistryTokenEnv: "mine"},
+		"username+password": {bundle.RegistryUsernameEnv: "u", bundle.RegistryPasswordEnv: "p"},
+	} {
+		w := &world{signer: coreSign}
+		c := setup(t, w)
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
+		if _, err := (&Resolver{Hub: c, Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1")); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(w.tokens) != 0 || w.pulls[0].Token != "" {
+			t.Errorf("%s: tokens = %v, dial token = %q", name, w.tokens, w.pulls[0].Token)
+		}
+	}
+}
+
+func TestImports_YankedReleaseIsSkipped(t *testing.T) {
+	w := &world{signer: coreSign, yanked: true}
+	res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(w.tokens) != 0 || w.pulls[0].Token != "" {
-		t.Errorf("tokens = %v, dial token = %q", w.tokens, w.pulls[0].Token)
+	if len(res.Imports) != 0 || len(w.pulls) != 0 || res.Skipped[0].ReferenceID != "CORE" || !strings.Contains(res.Skipped[0].Reason, "yanked") {
+		t.Errorf("res = %+v, pulls = %d", res, len(w.pulls))
+	}
+}
+
+func TestImports_DuplicateCoordinateIsPulledOnce(t *testing.T) {
+	w := &world{signer: coreSign}
+	dup := strings.Replace(string(body("v1")), "    - {id: EXT,", "    - {id: CORE2, title: Core, version: \"v1\", url: \"https://grc.store/acme/core\"}\n    - {id: EXT,", 1)
+	dup += "  - reference-id: CORE2\n    entries: [{reference-id: CORE2.CN01}]\n"
+	res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), []byte(dup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.pulls) != 1 || len(res.Imports) != 1 || res.Imports[0].ReferenceID != "CORE" {
+		t.Errorf("pulls = %d, imports = %+v", len(w.pulls), res.Imports)
+	}
+}
+
+func TestImports_UnreadableImportsFailClosed(t *testing.T) {
+	_, err := (&Resolver{Hub: setup(t, &world{signer: coreSign}), Verifier: &fakeVerifier{}}).
+		Imports(context.Background(), []byte("metadata:\n  id: x\nimports: just-a-string\n"))
+	if err == nil || !strings.Contains(err.Error(), "cannot read the artifact's imports") {
+		t.Errorf("err = %v", err)
 	}
 }
 
