@@ -15,7 +15,7 @@ This is the counterpart to [`grc-store-protocol`][protocol], and the split betwe
 | | `grc-store-protocol` | `grc-store-clientkit` (this repo) |
 |---|---|---|
 | Holds | the **wire contract** — types, constants, pure functions | the **client behaviour** that acts on it |
-| Dependencies | zero, enforced in CI | allowed — oras-go, sigstore-go, go-gemara, the protocol module |
+| Dependencies | zero, enforced in CI | allowed — oras-go, sigstore-go, go-gemara, sigs.k8s.io/yaml, the protocol module |
 | Network / disk | never | yes — that is what it is for |
 
 A thing belongs here when **more than one client tool must do it identically**, and getting it
@@ -30,16 +30,26 @@ does it, or if it is user-facing presentation — the CLIs own their own output.
 - **`auth`** — OIDC device-authorization grant (RFC 8628), the on-disk credential store, token
   resolution with refresh, and the GitHub Actions workload-OIDC fetch. Parameterized by an `App`
   (`{Name, TokenEnv, TokenFlag}`) so each tool keeps its own credential file and its own name in error messages.
-- **`hub`** — the hub's publish-side HTTP surface: discovery, the GitHub Actions trusted-publishing
+- **`hub`** — the hub HTTP client: discovery, the GitHub Actions trusted-publishing
   bearer (`CIBearer`), registry-token mint with a push-grant check, the immutable-version preflight,
-  and the bundle + plugin sync routes.
+  the bundle + plugin sync routes, and `GetCatalog` (a catalog's recorded signer and releases).
 - **`bundle`** — pack one artifact into a Gemara OCI bundle, push it (or write an OCI layout for a
-  dry run), attach OCI 1.1 referrers, and `Publish`: the full sequence in the one order both tools
+  dry run), attach OCI 1.1 referrers, `Registry.Pull` (a bundle and its signature by one resolved,
+  digest-checked manifest), and `Publish`: the full sequence in the one order both tools
   must share, fail-closed before any bytes move if the caller cannot push.
-- **`keyless`** — the Sigstore signing identity (explicit token, GitHub Actions, or browser) and a
-  DSSE in-toto signer emitting a Sigstore v0.3 bundle — the shared signed shape.
+- **`keyless`** — the Sigstore signing identity (explicit token, GitHub Actions, or browser), a
+  DSSE in-toto signer emitting a Sigstore v0.3 bundle — the shared signed shape — and the
+  verifier that checks one against the pinned trust root and an expected signer
+  (`PolicyFromRecordedIdentity` pins the identity a hub recorded at ingest).
+  `NewVerifierFromFile` takes a different trusted root, for air-gapped or private Sigstore
+  deployments only; it is not a way to re-vendor the public-good root.
 - **`provenance`** — the SLSA v1 predicate a publish embeds and signs, including the evaluator
   binding that ties an EvaluationLog to the plugin that produced it.
+- **`refs`** — selection of a Gemara artifact's mapping references (`imports`, `extends`,
+  `lexicon`) and recognition of which ones name an artifact on the targeted hub.
+- **`resolve`** — pulls the catalogs an artifact imports, at the pinned version, and verifies each
+  one against the signer the hub recorded for that import. Fails closed naming the import; a
+  reference to another host, or an import the hub does not have, is reported and skipped.
 - **`trustroot`** — the pinned public-good Sigstore trusted root, as bytes. Previously three
   byte-identical copies across grcli, privateer-sdk, and the hub backend; now one rotation obligation.
 
@@ -49,6 +59,7 @@ does it, or if it is user-facing presentation — the CLIs own their own output.
 go test -race ./...   # add -count=1 to skip the cache
 go vet ./...
 gofmt -l .            # must print nothing
+GRC_STORE_LIVE_HUB=https://hub.grc.store go test ./resolve -run Live   # opt-in, network; test-only, not a runtime override
 golangci-lint run ./...
 ```
 
@@ -57,7 +68,8 @@ and builds both consumer repos against the PR commit — it never blocks a merge
 breaking change can be the right call and a consumer's main can be red on its own.
 
 No Makefile. `go mod tidy` should stay a no-op. The protocol module is the zero-dependency one; this
-module carries oras-go, sigstore-go, go-gemara, and the protocol module, and adding anything further
+module carries oras-go, sigstore-go, go-gemara, sigs.k8s.io/yaml (`refs` parses artifact bodies
+with it), and the protocol module, and adding anything further
 is a decision worth making deliberately rather than by accident.
 
 ## Gotchas
