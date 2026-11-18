@@ -32,20 +32,20 @@ type Pulled struct {
 // Pull resolves reference (a tag or a digest) in repository once and reads
 // the bundle and its signature by the resolved digest, so the bytes returned
 // are the bytes the signature is checked against even if a tag moves mid-pull.
-func (r Registry) Pull(ctx context.Context, repository, tag string) (*Pulled, error) {
+func (r Registry) Pull(ctx context.Context, repository, reference string) (*Pulled, error) {
 	target, err := openRepository(r, repository)
 	if err != nil {
 		return nil, err
 	}
-	return pull(ctx, target, tag)
+	return pull(ctx, target, reference)
 }
 
-func pull(ctx context.Context, target oras.ReadOnlyTarget, tag string) (*Pulled, error) {
-	desc, err := target.Resolve(ctx, tag)
+func pull(ctx context.Context, target oras.ReadOnlyTarget, reference string) (*Pulled, error) {
+	desc, err := target.Resolve(ctx, reference)
 	if err != nil {
-		return nil, fmt.Errorf("resolving %s: %w", tag, err)
+		return nil, fmt.Errorf("resolving %s: %w", reference, err)
 	}
-	b, err := gbundle.Unpack(ctx, &pinned{ReadOnlyTarget: target, desc: desc, remaining: MaxPullBytes}, tag)
+	b, err := gbundle.Unpack(ctx, &pinned{ReadOnlyTarget: target, desc: desc, remaining: MaxPullBytes}, reference)
 	if err != nil {
 		return nil, err
 	}

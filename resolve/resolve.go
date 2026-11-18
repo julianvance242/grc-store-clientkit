@@ -41,8 +41,9 @@ import (
 	"github.com/gemaraproj/grc-store-clientkit/refs"
 )
 
-// Verifier is the signature check; *keyless.Verifier satisfies it.
-type Verifier interface {
+// verifier is the signature check. Unexported, so a caller cannot swap in a
+// check that always passes (ADR-0122 decision 8: no opt-out); tests set it.
+type verifier interface {
 	Verify(ctx context.Context, signatureBundle []byte, artifactDigest string, id keyless.IdentityPolicy) (keyless.VerifyResult, error)
 }
 
@@ -52,7 +53,11 @@ type Resolver struct {
 	// its Bearer, when set, mints pull tokens for private namespaces.
 	Hub *hub.Client
 	// Verifier defaults to keyless.NewVerifier (the pinned public-good root).
-	Verifier Verifier
+	// It is the concrete type, so it always carries the production SCT,
+	// Rekor and timestamp requirements.
+	Verifier *keyless.Verifier
+
+	verify verifier // test seam; nil in production
 }
 
 // Import is one pulled and verified import.
@@ -84,7 +89,7 @@ type Result struct {
 
 // ImportError is a fail-closed resolution failure for one import.
 type ImportError struct {
-	Import string // <namespace>/<catalog-id>@<version>, or the reference id when unrecognized
+	Import string // <namespace>/<catalog-id>@<version>, the reference id when unrecognized, or "artifact <metadata.id>" when its imports cannot be read
 	Err    error
 }
 
@@ -107,11 +112,13 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("hub base URL %q has no host", r.Hub.BaseURL)
 	}
-	verifier := r.Verifier
+	verifier := r.verify
 	if verifier == nil {
-		v, err := keyless.NewVerifier(0)
-		if err != nil {
-			return nil, err
+		v := r.Verifier
+		if v == nil {
+			if v, err = keyless.NewVerifier(0); err != nil {
+				return nil, err
+			}
 		}
 		verifier = v
 	}
@@ -121,7 +128,7 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 	}
 	// An imports field we cannot read would otherwise resolve as "no imports".
 	if a.ImportsUnreadable {
-		return nil, fmt.Errorf("cannot read the artifact's imports: %v", a.Notes)
+		return nil, &ImportError{"artifact " + a.ID, fmt.Errorf("cannot read its imports: %v", a.Notes)}
 	}
 
 	res := &Result{Notes: a.Notes}
@@ -190,7 +197,7 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 			dial.Token = tok.Token
 		}
 		// Pull the digest the hub indexed, not whatever the tag names now
-		// (ADR-0078: the index's digest is the authority).
+		// (semaphore ADR-0078: the index's digest is the authority).
 		p, err := pull(ctx, dial, repo, rel.ManifestDigest)
 		if err != nil {
 			return nil, &ImportError{coord, err}

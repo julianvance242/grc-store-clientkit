@@ -79,7 +79,7 @@ var ErrNoRecordedSigner = errors.New("hub has no recorded signer identity")
 // recorded at ingest ("keyless:<issuer>#<workflow-path>") into the policy
 // that pins it: exact issuer, and the workflow path anchored as
 // "^<path>@" so any git ref of that workflow verifies but nothing wider.
-// This is the zero-flag trust source of ADR-0048.
+// This is the zero-flag trust source of semaphore ADR-0048.
 func PolicyFromRecordedIdentity(canonical string) (IdentityPolicy, error) {
 	if canonical == "" {
 		return IdentityPolicy{}, ErrNoRecordedSigner

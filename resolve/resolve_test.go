@@ -21,10 +21,12 @@ import (
 )
 
 const (
-	issuer   = "https://token.actions.githubusercontent.com"
-	coreWF   = "https://github.com/acme/core/.github/workflows/release.yml"
-	primeWF  = "https://github.com/acme/primary/.github/workflows/release.yml"
-	coreSign = "keyless:" + issuer + "#" + coreWF
+	issuer    = "https://token.actions.githubusercontent.com"
+	coreWF    = "https://github.com/acme/core/.github/workflows/release.yml"
+	primeWF   = "https://github.com/acme/primary/.github/workflows/release.yml"
+	coreSign  = "keyless:" + issuer + "#" + coreWF
+	extraWF   = "https://github.com/acme/extra/.github/workflows/release.yml"
+	extraSign = "keyless:" + issuer + "#" + extraWF
 )
 
 // body imports CORE (on grc.store) and EXT (elsewhere); THREATS is a plain
@@ -45,6 +47,8 @@ imports:
 `, coreVersion)
 }
 
+var errBadSig = errors.New("signature verification failed")
+
 type fakeVerifier struct {
 	err    error
 	policy keyless.IdentityPolicy
@@ -61,15 +65,16 @@ func (f *fakeVerifier) Verify(_ context.Context, sig []byte, digest string, p ke
 }
 
 type world struct {
-	signer  string // signer_identity on acme/core
-	indexed string // manifest_digest the hub lists for v1; "" means "sha256:core"
-	served  string // digest the registry answers with; "" means the requested one
-	status  int    // non-zero: the catalog API answers acme/core with this status
-	pullErr error  // non-nil: the registry pull fails with this
-	broken  string // a hub path that answers 502 (discovery or token mint)
-	yanked  bool   // v1 is listed with tombstoned_at
-	tokens  []string
-	pulls   []bundle.Registry
+	signer     string // signer_identity on acme/core
+	indexed    string // manifest_digest the hub lists for v1; "" means "sha256:core"
+	served     string // digest the registry answers with; "" means the requested one
+	status     int    // non-zero: the catalog API answers acme/core with this status
+	pullErr    error  // non-nil: the registry pull fails with this
+	broken     string // a hub path that answers 502 (discovery or token mint)
+	yanked     bool   // v1 is listed with tombstoned_at
+	tokens     []string
+	discovered int
+	pulls      []bundle.Registry
 }
 
 // digest is what the hub indexes for v1; "-" stands for "none listed".
@@ -96,10 +101,12 @@ func setup(t *testing.T, w *world) *hub.Client {
 		}
 		switch r.URL.Path {
 		case hub.WellKnownPath:
+			w.discovered++
 			_, _ = rw.Write([]byte(`{"registry_url":"https://oci.test"}`))
 		case "/v2/token":
-			w.tokens = append(w.tokens, r.URL.Query().Get("scope"))
-			_, _ = rw.Write([]byte(`{"token":"pull-token"}`))
+			scope := r.URL.Query().Get("scope")
+			w.tokens = append(w.tokens, scope)
+			_, _ = fmt.Fprintf(rw, `{"token":"token-for-%s"}`, scope)
 		case "/v1/catalogs/acme/core":
 			if w.status != 0 {
 				rw.WriteHeader(w.status)
@@ -113,6 +120,11 @@ func setup(t *testing.T, w *world) *hub.Client {
 				"namespace": "acme", "catalog_id": "core", "signer_identity": w.signer,
 				"releases": []map[string]string{rel},
 			})
+		case "/v1/catalogs/acme/extra":
+			_ = json.NewEncoder(rw).Encode(map[string]any{
+				"namespace": "acme", "catalog_id": "extra", "signer_identity": extraSign,
+				"releases": []map[string]string{{"version": "v1", "manifest_digest": "sha256:extra"}},
+			})
 		case "/v1/catalogs/acme/primary":
 			t.Error("the importing artifact's record must never be read")
 		default:
@@ -124,6 +136,9 @@ func setup(t *testing.T, w *world) *hub.Client {
 	orig := pull
 	pull = func(_ context.Context, r bundle.Registry, repository, tag string) (*bundle.Pulled, error) {
 		w.pulls = append(w.pulls, r)
+		if repository == "acme/extra" && tag == "sha256:extra" {
+			return &bundle.Pulled{Bundle: &gbundle.Bundle{}, ManifestDigest: tag, Signature: []byte("sig-extra")}, nil
+		}
 		if repository != "acme/core" || tag != w.digest() {
 			t.Errorf("pull %s@%s, want the indexed digest", repository, tag)
 		}
@@ -147,7 +162,7 @@ func setup(t *testing.T, w *world) *hub.Client {
 func TestImports_PullsAndVerifiesAgainstTheImportsOwnRecord(t *testing.T) {
 	w := &world{signer: coreSign}
 	v := &fakeVerifier{}
-	res, err := (&Resolver{Hub: setup(t, w), Verifier: v}).Imports(context.Background(), body("v1"))
+	res, err := (&Resolver{Hub: setup(t, w), verify: v}).Imports(context.Background(), body("v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +181,7 @@ func TestImports_PullsAndVerifiesAgainstTheImportsOwnRecord(t *testing.T) {
 	if v.digest != "sha256:core" || v.sig != "sig" {
 		t.Errorf("verified %s over %s", v.sig, v.digest)
 	}
-	if len(w.tokens) != 1 || w.tokens[0] != "repository:acme/core:pull" || w.pulls[0].Token != "pull-token" || w.pulls[0].Host != "oci.test" {
+	if len(w.tokens) != 1 || w.tokens[0] != "repository:acme/core:pull" || w.pulls[0].Token != "token-for-repository:acme/core:pull" || w.pulls[0].Host != "oci.test" {
 		t.Errorf("tokens = %v, pulls = %+v", w.tokens, w.pulls)
 	}
 	if len(res.Skipped) != 1 || res.Skipped[0].ReferenceID != "EXT" {
@@ -186,24 +201,26 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 		status  int
 		pullErr error
 		broken  string
+		hub502  bool   // the error carries the hub's 502
+		msg     string // the error names the failing step
 	}{
 		{name: "no recorded signer", version: "v1", want: keyless.ErrNoRecordedSigner},
 		{name: "unsigned", signer: coreSign, version: "v1", verify: keyless.ErrUnsigned, want: keyless.ErrUnsigned},
-		{name: "bad signature", signer: coreSign, version: "v1", verify: errors.New("signature verification failed")},
+		{name: "bad signature", signer: coreSign, version: "v1", verify: errBadSig, want: errBadSig},
 		{name: "non-keyless record", signer: "key:abc", version: "v1"},
 		{name: "no pinned version", signer: coreSign, version: ""},
 		{name: "no indexed digest", signer: coreSign, version: "v1", indexed: "-"},
 		{name: "registry serves other bytes", signer: coreSign, version: "v1", served: "sha256:other"},
-		{name: "hub 5xx", signer: coreSign, version: "v1", status: http.StatusBadGateway},
+		{name: "hub 5xx", signer: coreSign, version: "v1", status: http.StatusBadGateway, hub502: true},
+		{name: "discovery fails", signer: coreSign, version: "v1", broken: hub.WellKnownPath, msg: "discovery"},
+		{name: "pull-token mint fails", signer: coreSign, version: "v1", broken: "/v2/token", hub502: true},
 		// The hub lists the release, so a registry 404 is a registry error, never a skip.
-		{name: "discovery fails", signer: coreSign, version: "v1", broken: hub.WellKnownPath},
-		{name: "pull-token mint fails", signer: coreSign, version: "v1", broken: "/v2/token"},
 		{name: "registry 404 for a listed release", signer: coreSign, version: "v1", pullErr: errdef.ErrNotFound, want: errdef.ErrNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &world{signer: tc.signer, indexed: tc.indexed, served: tc.served, status: tc.status, pullErr: tc.pullErr, broken: tc.broken}
-			res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{err: tc.verify}}).Imports(context.Background(), body(tc.version))
+			res, err := (&Resolver{Hub: setup(t, w), verify: &fakeVerifier{err: tc.verify}}).Imports(context.Background(), body(tc.version))
 			var ie *ImportError
 			if res != nil || !errors.As(err, &ie) || !strings.HasPrefix(ie.Import, "acme/core@") {
 				t.Fatalf("res = %+v, err = %v; want an ImportError naming acme/core", res, err)
@@ -211,13 +228,20 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 			if tc.want != nil && !errors.Is(err, tc.want) {
 				t.Errorf("err = %v, want %v", err, tc.want)
 			}
+			var se *hub.StatusError
+			if tc.hub502 && (!errors.As(err, &se) || se.Status != http.StatusBadGateway) {
+				t.Errorf("err = %v, want the hub's 502", err)
+			}
+			if !strings.Contains(err.Error(), tc.msg) {
+				t.Errorf("err = %v, want it to mention %q", err, tc.msg)
+			}
 		})
 	}
 }
 
 func TestImports_UnpublishedImportIsSkipped(t *testing.T) {
 	w := &world{signer: coreSign}
-	res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v9"))
+	res, err := (&Resolver{Hub: setup(t, w), verify: &fakeVerifier{}}).Imports(context.Background(), body("v9"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +261,7 @@ func TestImports_CallerCredentialSkipsTheMint(t *testing.T) {
 		for k, v := range env {
 			t.Setenv(k, v)
 		}
-		if _, err := (&Resolver{Hub: c, Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1")); err != nil {
+		if _, err := (&Resolver{Hub: c, verify: &fakeVerifier{}}).Imports(context.Background(), body("v1")); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if len(w.tokens) != 0 || w.pulls[0].Token != "" {
@@ -248,7 +272,7 @@ func TestImports_CallerCredentialSkipsTheMint(t *testing.T) {
 
 func TestImports_YankedReleaseIsSkipped(t *testing.T) {
 	w := &world{signer: coreSign, yanked: true}
-	res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1"))
+	res, err := (&Resolver{Hub: setup(t, w), verify: &fakeVerifier{}}).Imports(context.Background(), body("v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +285,7 @@ func TestImports_DuplicateCoordinateIsPulledOnce(t *testing.T) {
 	w := &world{signer: coreSign}
 	dup := strings.Replace(string(body("v1")), "    - {id: EXT,", "    - {id: CORE2, title: Core, version: \"v1\", url: \"https://grc.store/acme/core\"}\n    - {id: EXT,", 1)
 	dup += "  - reference-id: CORE2\n    entries: [{reference-id: CORE2.CN01}]\n"
-	res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), []byte(dup))
+	res, err := (&Resolver{Hub: setup(t, w), verify: &fakeVerifier{}}).Imports(context.Background(), []byte(dup))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,9 +295,10 @@ func TestImports_DuplicateCoordinateIsPulledOnce(t *testing.T) {
 }
 
 func TestImports_UnreadableImportsFailClosed(t *testing.T) {
-	_, err := (&Resolver{Hub: setup(t, &world{signer: coreSign}), Verifier: &fakeVerifier{}}).
+	_, err := (&Resolver{Hub: setup(t, &world{signer: coreSign}), verify: &fakeVerifier{}}).
 		Imports(context.Background(), []byte("metadata:\n  id: x\nimports: just-a-string\n"))
-	if err == nil || !strings.Contains(err.Error(), "cannot read the artifact's imports") {
+	var ie *ImportError
+	if !errors.As(err, &ie) || ie.Import != "artifact x" || !strings.Contains(err.Error(), "cannot read its imports") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -281,7 +306,7 @@ func TestImports_UnreadableImportsFailClosed(t *testing.T) {
 func TestImports_CatalogMissingOrYankedIsSkipped(t *testing.T) {
 	for status, reason := range map[int]string{http.StatusNotFound: "not found", http.StatusGone: "yank"} {
 		w := &world{signer: coreSign, status: status}
-		res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{}}).Imports(context.Background(), body("v1"))
+		res, err := (&Resolver{Hub: setup(t, w), verify: &fakeVerifier{}}).Imports(context.Background(), body("v1"))
 		if err != nil {
 			t.Fatalf("%d: %v", status, err)
 		}
@@ -294,5 +319,34 @@ func TestImports_CatalogMissingOrYankedIsSkipped(t *testing.T) {
 		if len(res.Imports) != 0 || len(w.pulls) != 0 || core == nil || !strings.Contains(core.Reason, reason) {
 			t.Errorf("%d: res = %+v, pulls = %d; want acme/core skipped with %q", status, res, len(w.pulls), reason)
 		}
+	}
+}
+
+// policyLog records every policy a verification was asked for.
+type policyLog struct{ policies []keyless.IdentityPolicy }
+
+func (l *policyLog) Verify(_ context.Context, _ []byte, _ string, p keyless.IdentityPolicy) (keyless.VerifyResult, error) {
+	l.policies = append(l.policies, p)
+	return keyless.VerifyResult{}, nil
+}
+
+func TestImports_TwoImportsShareDiscoveryButNotTokens(t *testing.T) {
+	w := &world{signer: coreSign}
+	two := strings.Replace(string(body("v1")), "    - {id: EXT,", "    - {id: EXTRA, title: Extra, version: \"v1\", url: \"https://grc.store/acme/extra\"}\n    - {id: EXT,", 1)
+	two += "  - reference-id: EXTRA\n    entries: [{reference-id: EXTRA.1}]\n"
+	v := &policyLog{}
+	res, err := (&Resolver{Hub: setup(t, w), verify: v}).Imports(context.Background(), []byte(two))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Imports) != 2 || w.discovered != 1 {
+		t.Fatalf("imports = %d, discovery calls = %d", len(res.Imports), w.discovered)
+	}
+	if strings.Join(w.tokens, " ") != "repository:acme/core:pull repository:acme/extra:pull" ||
+		w.pulls[0].Token != "token-for-repository:acme/core:pull" || w.pulls[1].Token != "token-for-repository:acme/extra:pull" {
+		t.Errorf("tokens = %v, pulls = %+v", w.tokens, w.pulls)
+	}
+	if len(v.policies) != 2 || !strings.Contains(v.policies[0].SANRegexp, "acme/core") || !strings.Contains(v.policies[1].SANRegexp, "acme/extra") {
+		t.Errorf("policies = %+v", v.policies)
 	}
 }

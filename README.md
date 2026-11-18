@@ -30,11 +30,12 @@ does it, or if it is user-facing presentation — the CLIs own their own output.
 - **`auth`** — OIDC device-authorization grant (RFC 8628), the on-disk credential store, token
   resolution with refresh, and the GitHub Actions workload-OIDC fetch. Parameterized by an `App`
   (`{Name, TokenEnv, TokenFlag}`) so each tool keeps its own credential file and its own name in error messages.
-- **`hub`** — the hub's publish-side HTTP surface: discovery, the GitHub Actions trusted-publishing
+- **`hub`** — the hub HTTP client: discovery, the GitHub Actions trusted-publishing
   bearer (`CIBearer`), registry-token mint with a push-grant check, the immutable-version preflight,
-  and the bundle + plugin sync routes.
+  the bundle + plugin sync routes, and `GetCatalog` (a catalog's recorded signer and releases).
 - **`bundle`** — pack one artifact into a Gemara OCI bundle, push it (or write an OCI layout for a
-  dry run), attach OCI 1.1 referrers, and `Publish`: the full sequence in the one order both tools
+  dry run), attach OCI 1.1 referrers, `Registry.Pull` (a bundle and its signature by one resolved,
+  digest-checked manifest), and `Publish`: the full sequence in the one order both tools
   must share, fail-closed before any bytes move if the caller cannot push.
 - **`keyless`** — the Sigstore signing identity (explicit token, GitHub Actions, or browser), a
   DSSE in-toto signer emitting a Sigstore v0.3 bundle — the shared signed shape — and the

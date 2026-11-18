@@ -168,3 +168,26 @@ func attachWithLayer(ctx context.Context, store *memory.Store, res *Result, arti
 	d := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, ArtifactType: artifactType, Digest: godigest.FromBytes(m), Size: int64(len(m))}
 	return store.Push(ctx, d, bytes.NewReader(m))
 }
+
+func TestPull_SizeCapIsSummedAcrossBlobs(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	res, err := pack(ctx, store, "v1", testInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := res.Manifest
+	// The cap is shared: room for exactly one read of the manifest, not two.
+	p := &pinned{ReadOnlyTarget: store, desc: m, remaining: m.Size}
+	if _, err := p.Fetch(ctx, m); err != nil {
+		t.Fatalf("at the cap: %v", err)
+	}
+	if _, err := p.Fetch(ctx, m); !errors.Is(err, ErrPullTooLarge) {
+		t.Errorf("over the summed cap: err = %v", err)
+	}
+	neg := m
+	neg.Size = -1
+	if _, err := (&pinned{ReadOnlyTarget: store, desc: m, remaining: MaxPullBytes}).Fetch(ctx, neg); !errors.Is(err, ErrPullTooLarge) {
+		t.Errorf("negative size: err = %v", err)
+	}
+}

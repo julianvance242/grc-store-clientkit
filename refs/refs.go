@@ -38,7 +38,7 @@ const (
 	AllReferences
 )
 
-// Reference category labels (also the materialization subdirectory names).
+// Reference category labels (grcli also uses them as unpack subdirectory names).
 const (
 	CategoryImports   = "imports"
 	CategoryExtends   = "extends"
@@ -58,7 +58,8 @@ type Selected struct {
 // Artifact is the subset of a parsed Gemara artifact that matters for
 // reference resolution.
 type Artifact struct {
-	// Type is the artifact's metadata.type, for diagnostics.
+	// ID and Type are the artifact's metadata.id and metadata.type, for diagnostics.
+	ID   string
 	Type string
 	// MappingRefs is the metadata registry of external documents.
 	MappingRefs []gemara.MappingReference
@@ -89,6 +90,7 @@ func Scan(body []byte) (*Artifact, error) {
 	}
 
 	a := &Artifact{
+		ID:          meta.Metadata.Id,
 		Type:        meta.Metadata.Type.String(),
 		MappingRefs: meta.Metadata.MappingReferences,
 		category:    make(map[string]string),
