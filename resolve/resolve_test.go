@@ -60,9 +60,22 @@ func (f *fakeVerifier) Verify(_ context.Context, sig []byte, digest string, p ke
 }
 
 type world struct {
-	signer string // signer_identity on acme/core
-	tokens []string
-	pulls  []bundle.Registry
+	signer  string // signer_identity on acme/core
+	indexed string // manifest_digest the hub lists for v1; "" means "sha256:core"
+	served  string // digest the registry answers with; "" means the requested one
+	tokens  []string
+	pulls   []bundle.Registry
+}
+
+// digest is what the hub indexes for v1; "-" stands for "none listed".
+func (w *world) digest() string {
+	switch w.indexed {
+	case "":
+		return "sha256:core"
+	case "-":
+		return ""
+	}
+	return w.indexed
 }
 
 func setup(t *testing.T, w *world) *hub.Client {
@@ -77,7 +90,7 @@ func setup(t *testing.T, w *world) *hub.Client {
 		case "/v1/catalogs/acme/core":
 			_ = json.NewEncoder(rw).Encode(map[string]any{
 				"namespace": "acme", "catalog_id": "core", "signer_identity": w.signer,
-				"releases": []map[string]string{{"version": "v1", "license": "Apache-2.0"}},
+				"releases": []map[string]string{{"version": "v1", "license": "Apache-2.0", "manifest_digest": w.digest()}},
 			})
 		case "/v1/catalogs/acme/primary":
 			t.Error("the importing artifact's record must never be read")
@@ -90,12 +103,16 @@ func setup(t *testing.T, w *world) *hub.Client {
 	orig := pull
 	pull = func(_ context.Context, r bundle.Registry, repository, tag string) (*bundle.Pulled, error) {
 		w.pulls = append(w.pulls, r)
-		if repository != "acme/core" || tag != "v1" {
-			t.Errorf("pull %s:%s", repository, tag)
+		if repository != "acme/core" || tag != w.digest() {
+			t.Errorf("pull %s@%s, want the indexed digest", repository, tag)
+		}
+		served := w.served
+		if served == "" {
+			served = tag
 		}
 		return &bundle.Pulled{
 			Bundle:         &gbundle.Bundle{Source: gbundle.File{Name: "core.yaml", Data: []byte("core")}},
-			ManifestDigest: "sha256:core",
+			ManifestDigest: served,
 			Signature:      []byte("sig"),
 		}, nil
 	}
@@ -141,16 +158,20 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 		version string
 		verify  error
 		want    error
+		indexed string
+		served  string
 	}{
 		{name: "no recorded signer", version: "v1", want: keyless.ErrNoRecordedSigner},
 		{name: "unsigned", signer: coreSign, version: "v1", verify: keyless.ErrUnsigned, want: keyless.ErrUnsigned},
 		{name: "bad signature", signer: coreSign, version: "v1", verify: errors.New("signature verification failed")},
 		{name: "non-keyless record", signer: "key:abc", version: "v1"},
 		{name: "no pinned version", signer: coreSign, version: ""},
+		{name: "no indexed digest", signer: coreSign, version: "v1", indexed: "-"},
+		{name: "registry serves other bytes", signer: coreSign, version: "v1", served: "sha256:other"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &world{signer: tc.signer}
+			w := &world{signer: tc.signer, indexed: tc.indexed, served: tc.served}
 			res, err := (&Resolver{Hub: setup(t, w), Verifier: &fakeVerifier{err: tc.verify}}).Imports(context.Background(), body(tc.version))
 			var ie *ImportError
 			if res != nil || !errors.As(err, &ie) || !strings.HasPrefix(ie.Import, "acme/core@") {

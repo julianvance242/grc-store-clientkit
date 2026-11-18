@@ -9,11 +9,19 @@
 // Selection and host recognition are package refs (the latter is
 // grc-store-protocol/refurl). A reference to a host that is neither a
 // grc.store host nor the targeted hub, and an import the hub does not have,
-// are reported in Result.Skipped (ADR-0039). Every other failure fails the
-// whole resolution closed with an *ImportError naming the import: an import
-// with no version pinned, no recorded signer, no signature, a signature
-// that does not verify, or a transport error. Resolution is direct-only:
-// an import's own imports are not followed.
+// are reported in Result.Skipped; "does not have" means the hub's catalog
+// API answers 404 or 410, or lists no release at the pinned version. Every
+// other failure fails the whole resolution closed with an *ImportError
+// naming the import: no version pinned, no recorded signer or indexed
+// digest, no signature, a signature that does not verify, or a hub,
+// registry or transport error (a registry 404 for a release the hub lists
+// included). The bytes pulled are those of the digest the hub indexed for
+// the version. Nothing is retried here beyond the registry client's own
+// transport retry. Resolution is direct-only: an import's own imports are
+// not followed.
+//
+// Callers must surface every Result.Skipped entry with its reason and must
+// not present the result as complete while Skipped is non-empty.
 package resolve
 
 import (
@@ -141,6 +149,9 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 			res.Skipped = append(res.Skipped, Skipped{s.ID, s.URL, "version " + s.Version + " is not published on the hub"})
 			continue
 		}
+		if rel.ManifestDigest == "" {
+			return nil, &ImportError{coord, errors.New("hub record lists no manifest digest for this version")}
+		}
 		policy, err := keyless.PolicyFromRecordedIdentity(cat.SignerIdentity)
 		if err != nil {
 			return nil, &ImportError{coord, err}
@@ -168,9 +179,14 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 			}
 			dial.Token = tok.Token
 		}
-		p, err := pull(ctx, dial, repo, s.Version)
+		// Pull the digest the hub indexed, not whatever the tag names now
+		// (ADR-0078: the index's digest is the authority).
+		p, err := pull(ctx, dial, repo, rel.ManifestDigest)
 		if err != nil {
 			return nil, &ImportError{coord, err}
+		}
+		if p.ManifestDigest != rel.ManifestDigest {
+			return nil, &ImportError{coord, fmt.Errorf("registry served %s, hub indexed %s", p.ManifestDigest, rel.ManifestDigest)}
 		}
 		vr, err := verifier.Verify(ctx, p.Signature, p.ManifestDigest, policy)
 		if err != nil {

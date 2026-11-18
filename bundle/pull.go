@@ -27,9 +27,9 @@ type Pulled struct {
 	Signature []byte
 }
 
-// Pull resolves <repository>:<tag> once and reads the bundle and its
-// signature by the resolved digest, so the bytes returned are the bytes the
-// signature is checked against even if the tag moves mid-pull.
+// Pull resolves reference (a tag or a digest) in repository once and reads
+// the bundle and its signature by the resolved digest, so the bytes returned
+// are the bytes the signature is checked against even if a tag moves mid-pull.
 func (r Registry) Pull(ctx context.Context, repository, tag string) (*Pulled, error) {
 	target, err := openRepository(r, repository)
 	if err != nil {
