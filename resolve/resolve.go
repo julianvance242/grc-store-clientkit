@@ -3,7 +3,8 @@
 // Package resolve pulls the catalogs a Gemara artifact imports and verifies
 // each one's signature the way a primary artifact is verified: against the
 // signer identity the hub recorded for that import's own coordinate at
-// ingest (ADR-0045/0048), never the importing artifact's.
+// ingest, never the importing artifact's. The decision is ADR-0122 in
+// revanite-io/semaphore (superseding ADR-0080 for imports).
 //
 // Selection and host recognition are package refs (the latter is
 // grc-store-protocol/refurl). A reference to a host that is neither a

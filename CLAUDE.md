@@ -34,7 +34,7 @@ tools must do it identically** and a subtle divergence would be invisible from e
 - `provenance` — SLSA v1 predicate builder, with the `Evaluator` binding for EvaluationLogs.
 - `refs` — pure reference selection + host recognition (moved from grcli `internal/refs`).
 - `resolve` — import resolver: pull each import, verify against its own hub-recorded signer
-  (ADR-0045/0048 trust source), fail closed naming the import. Direct-only, no cache.
+  (semaphore ADR-0122), fail closed naming the import. Direct-only, no cache.
 - `trustroot` — the pinned public-good Sigstore trusted root, as bytes.
 
 ## Gotchas
