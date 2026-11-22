@@ -7,17 +7,19 @@
 // revanite-io/semaphore (superseding ADR-0080 for imports).
 //
 // Selection and host recognition are package refs (the latter is
-// grc-store-protocol/refurl). A reference to a host that is neither a
-// grc.store host nor the targeted hub, and an import the hub does not have,
-// are reported in Result.Skipped; "does not have" means the hub's catalog
-// API answers 404 or 410, lists no release at the pinned version, or marks
-// that release yanked (tombstoned). Every
-// other failure fails the whole resolution closed with an *ImportError
-// naming the import (or, for an imports field that cannot be read, the
-// artifact): no version pinned, no recorded signer or indexed
-// digest, no signature, a signature that does not verify, or a hub,
+// grc-store-protocol/refurl). Only two kinds of import are skipped and
+// reported in Result.Skipped: a reference to a host that is neither a
+// grc.store host nor the targeted hub, and an import the hub does not have.
+// "Does not have" means the hub's catalog API answers 404 or 410, lists no
+// release at the pinned version, or marks that release yanked (tombstoned).
+// Every other failure fails the whole resolution closed with an
+// *ImportError naming the import: a malformed reference (an unparseable url,
+// one with no host, or a grc.store or target-hub url whose path is not
+// /{namespace}/{catalog_id}), no version pinned, no recorded signer or
+// indexed digest, no signature, a signature that does not verify, or a hub,
 // registry or transport error (a registry 404 for a release the hub lists
-// included). The bytes pulled are those of the digest the hub indexed for
+// included). An imports field that cannot be read fails closed naming the
+// artifact. The bytes pulled are those of the digest the hub indexed for
 // the version. Nothing is retried here beyond the registry client's own
 // transport retry. Resolution is direct-only: an import's own imports are
 // not followed.
@@ -39,6 +41,7 @@ import (
 	"github.com/gemaraproj/grc-store-clientkit/hub"
 	"github.com/gemaraproj/grc-store-clientkit/keyless"
 	"github.com/gemaraproj/grc-store-clientkit/refs"
+	"github.com/revanite-io/grc-store-protocol/refurl"
 )
 
 // verifier is the signature check. Unexported, so a caller cannot swap in a
@@ -89,7 +92,10 @@ type Result struct {
 
 // ImportError is a fail-closed resolution failure for one import.
 type ImportError struct {
-	Import string // <namespace>/<catalog-id>@<version>, the reference id when unrecognized, or "artifact <metadata.id>" when its imports cannot be read
+	// Import is <namespace>/<catalog-id>@<version>; the mapping reference id
+	// when its url is malformed; or "artifact <metadata.id>" when the
+	// artifact's imports field cannot be read.
+	Import string
 	Err    error
 }
 
@@ -137,8 +143,13 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 	for _, s := range a.Select(refs.ImportsOnly) {
 		ns, id, ok, reason := refs.Recognize(s.URL, u.Host)
 		if !ok {
-			res.Skipped = append(res.Skipped, Skipped{s.ID, s.URL, reason})
-			continue
+			// Only a foreign host is a legitimate skip; a malformed
+			// reference fails closed (ruled 2026-11-21, ADR-0122).
+			if foreignHost(s.URL, u.Host) {
+				res.Skipped = append(res.Skipped, Skipped{s.ID, s.URL, reason})
+				continue
+			}
+			return nil, &ImportError{s.ID, errors.New(reason)}
 		}
 		coord := fmt.Sprintf("%s/%s@%s", ns, id, s.Version)
 		if s.Version == "" {
@@ -215,6 +226,13 @@ func (r *Resolver) Imports(ctx context.Context, body []byte) (*Result, error) {
 		})
 	}
 	return res, nil
+}
+
+// foreignHost reports whether refURL parses with a host that is neither a
+// grc.store host nor targetHost, the same host test refs.Recognize applies.
+func foreignHost(refURL, targetHost string) bool {
+	u, err := neturl.Parse(refURL)
+	return err == nil && u.Host != "" && !refurl.IsGrcStoreHost(u.Host) && u.Host != targetHost
 }
 
 func userRegistryCredential() bool {

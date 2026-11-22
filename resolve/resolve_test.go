@@ -239,6 +239,28 @@ func TestImports_FailsClosedNamingTheImport(t *testing.T) {
 	}
 }
 
+// A malformed reference fails closed naming the reference id (ruled
+// 2026-11-21); only a foreign host is skipped.
+func TestImports_MalformedReferenceFailsClosed(t *testing.T) {
+	for name, url := range map[string]string{
+		"grc.store path not a coordinate":  "https://grc.store/acme/core/extra",
+		"target hub path not a coordinate": "{target}/v1/nope",
+		"no host":                          "/acme/core",
+		"unparseable":                      "https://grc.store/%zz",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := setup(t, &world{signer: coreSign})
+			url = strings.Replace(url, "{target}", h.BaseURL, 1)
+			b := fmt.Appendf(nil, "metadata:\n  id: acme.primary\n  type: ControlCatalog\n  mapping-references:\n    - {id: BAD, title: Bad, version: v1, url: %q}\nimports:\n  - reference-id: BAD\n", url)
+			res, err := (&Resolver{Hub: h, verify: &fakeVerifier{}}).Imports(context.Background(), b)
+			var ie *ImportError
+			if res != nil || !errors.As(err, &ie) || ie.Import != "BAD" {
+				t.Fatalf("res = %+v, err = %v; want an ImportError naming BAD", res, err)
+			}
+		})
+	}
+}
+
 func TestImports_UnpublishedImportIsSkipped(t *testing.T) {
 	w := &world{signer: coreSign}
 	res, err := (&Resolver{Hub: setup(t, w), verify: &fakeVerifier{}}).Imports(context.Background(), body("v9"))
