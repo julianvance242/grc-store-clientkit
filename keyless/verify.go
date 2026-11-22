@@ -150,6 +150,9 @@ func (v *Verifier) Verify(ctx context.Context, signatureBundle []byte, artifactD
 	if len(signatureBundle) == 0 {
 		return VerifyResult{}, ErrUnsigned
 	}
+	if err := ctx.Err(); err != nil {
+		return VerifyResult{}, err
+	}
 	certID, err := id.certificateIdentity()
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("build identity policy: %w", err)

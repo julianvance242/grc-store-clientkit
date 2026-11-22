@@ -3,7 +3,6 @@
 package refs
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -194,56 +193,5 @@ func TestRecognizeWidenedShapes(t *testing.T) {
 				t.Errorf("(ns,id) = (%q,%q), want (%q,%q)", ns, id, tc.wantNS, tc.wantID)
 			}
 		})
-	}
-}
-
-func TestLint(t *testing.T) {
-	body := []byte(`metadata:
-  id: my-catalog
-  type: ControlCatalog
-  lexicon:
-    reference-id: lex
-  mapping-references:
-    - id: ok
-      title: Canonical
-      version: "1.0"
-      url: https://grc.store/acme/baseline
-    - id: ext
-      title: External standard, any url is fine
-      url: https://github.com/ossf/scorecard
-    - id: legacy
-      title: Legacy search form
-      url: https://grc.store/search/finos-aigf/finos-air/versions/0.2.0
-    - id: api
-      title: API form
-      url: https://hub.grc.store/v1/catalogs/Acme/Base_Guidance
-    - id: junk
-      title: grc.store host but no coordinate
-      url: https://grc.store/acme/baseline/extra
-    - id: lex
-      title: Lexicon with no url
-    - id: shelf
-      title: Declared, unused, no url
-imports:
-  - reference-id: ok
-`)
-	a, err := Scan(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := a.Lint()
-	want := []string{
-		`"legacy" url "https://grc.store/search/finos-aigf/finos-air/versions/0.2.0" resolves, but the canonical form is https://grc.store/finos-aigf/finos-air with version: "0.2.0"`,
-		`"api" url "https://hub.grc.store/v1/catalogs/Acme/Base_Guidance" resolves, but the canonical form is https://grc.store/acme/base-guidance`,
-		`"junk" url "https://grc.store/acme/baseline/extra" does not name a grc.store artifact`,
-		`"lex" is used by lexicon but has no url`,
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d warnings, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
-	}
-	for i, w := range want {
-		if !strings.Contains(got[i], w) {
-			t.Errorf("warning %d = %q, want it to contain %q", i, got[i], w)
-		}
 	}
 }

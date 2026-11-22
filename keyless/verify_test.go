@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,5 +211,73 @@ func TestProductionVerifiersRequireSCT(t *testing.T) {
 	}
 	if _, err := NewVerifierFromFile(filepath.Join(t.TempDir(), "missing.json"), 0); err == nil {
 		t.Fatal("missing file: want error")
+	}
+}
+
+// A real public-good Sigstore bundle: the signature on
+// finos-ccc/ccc.core.controls@v2026.11 as published to grc.store.
+const (
+	realBundleFile = "testdata/ccc-core-controls-v2026.11.sigstore.json"
+	realDigest     = "sha256:7c9e9cd59ca1f5d1d39062cb851c920d5cf07c3bc1d90fdf849fa0c5b2c15d04"
+)
+
+func realBundle(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(realBundleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// The exported Verify, end to end, with the production verifier over the
+// embedded trust root (SCT, Rekor and timestamp all required).
+func TestVerify_RealBundleEndToEnd(t *testing.T) {
+	v, err := NewVerifier(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	res, err := v.Verify(ctx, realBundle(t), realDigest, recordedPolicy(t))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.Identity != recorded {
+		t.Fatalf("identity = %q, want %q", res.Identity, recorded)
+	}
+	if _, err := v.Verify(ctx, realBundle(t), digestOf([]byte("other")), recordedPolicy(t)); err == nil {
+		t.Fatal("other digest: verified; want rejection")
+	}
+	other, err := PolicyFromRecordedIdentity("keyless:" + ghaIssuer + "#https://github.com/evil/repo/.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(ctx, realBundle(t), realDigest, other); err == nil {
+		t.Fatal("other signer: verified; want rejection")
+	}
+}
+
+func TestVerify_CancelledContext(t *testing.T) {
+	v, err := NewVerifier(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := v.Verify(ctx, realBundle(t), realDigest, recordedPolicy(t)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestVerify_Timeout(t *testing.T) {
+	// 1ns elapses long before a real verification (signature, SCT, Rekor
+	// checks) can finish, so the timer always wins the select.
+	v, err := NewVerifier(time.Nanosecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = v.Verify(context.Background(), realBundle(t), realDigest, recordedPolicy(t))
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout", err)
 	}
 }

@@ -191,3 +191,67 @@ func TestPull_SizeCapIsSummedAcrossBlobs(t *testing.T) {
 		t.Errorf("negative size: err = %v", err)
 	}
 }
+
+// The cap is enforced inside Pull: a manifest whose layer claims more than
+// MaxPullBytes fails before that layer is fetched.
+func TestPull_SizeCapThroughPull(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	res, err := pack(ctx, store, "v1", testInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := store.Fetch(ctx, res.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m ocispec.Manifest
+	err = json.NewDecoder(rc).Decode(&m)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Layers[0].Size = MaxPullBytes + 1
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: godigest.FromBytes(b), Size: int64(len(b))}
+	if err := store.Push(ctx, big, bytes.NewReader(b)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Tag(ctx, big, "big"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pull(ctx, store, "big"); !errors.Is(err, ErrPullTooLarge) {
+		t.Fatalf("err = %v, want ErrPullTooLarge", err)
+	}
+}
+
+// With several signature referrers on one manifest (a re-sign, or cosign
+// plus Publish), Pull returns one of their bundles, never the provenance.
+func TestPull_MultipleSignatureReferrers(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	res, err := pack(ctx, store, "v1", testInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AttachReferrer(ctx, store, res.Manifest, ProvenanceArtifactType, []byte(`{"p":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	sigA, sigB := []byte(`{"sig":"a"}`), []byte(`{"sig":"b"}`)
+	if err := attachWithLayer(ctx, store, res, mediatype.SigstoreBundle, mediatype.SigstoreBundle, sigA); err != nil {
+		t.Fatal(err)
+	}
+	if err := attachWithLayer(ctx, store, res, mediatype.CosignSignReferrer, mediatype.SigstoreBundle, sigB); err != nil {
+		t.Fatal(err)
+	}
+	got, err := pull(ctx, store, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(got.Signature); s != string(sigA) && s != string(sigB) {
+		t.Fatalf("signature = %q, want one of the two signature bundles", s)
+	}
+}
